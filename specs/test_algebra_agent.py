@@ -126,7 +126,8 @@ def refuse_override(context):
 
 @given(parsers.parse('a multi-turn session "{session_id}" with async SQLite memory store'))
 def session_with_async_memory(context, session_id):
-    context["session_id"] = session_id
+    unique_id = f"{session_id}_{time.time()}"
+    context["session_id"] = unique_id
 
 
 @when('the student sends 5 sequential questions to the agent')

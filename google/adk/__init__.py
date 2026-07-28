@@ -1,7 +1,9 @@
-"""Google Agent Development Kit (ADK) 2.0 Core Module."""
+"""Google Agent Development Kit (ADK) 2.0 Core Module with Async Memory & Compaction Support."""
 
-from typing import Any, Callable, Dict, List, Optional, Generator, Union
+import asyncio
+from typing import Any, Callable, Dict, List, Optional, Union
 from pydantic import BaseModel, Field
+from memory import AsyncSessionMemory, SessionState, HistoryCompactor
 
 # =====================================================================
 # TYPES DEFINITIONS
@@ -44,8 +46,8 @@ class LlmAgent(Agent):
         self.instruction = instruction
         self.tools = tools or []
 
-    def generate_response(self, user_text: str, context: Optional[Dict[str, Any]] = None) -> str:
-        """Simulates LLM response based on Socratic instruction & MCP verifier context."""
+    def generate_response(self, user_text: str, context: Optional[Dict[str, Any]] = None, session_state: Optional[SessionState] = None) -> str:
+        """Simulates LLM response based on Socratic instruction, MCP verifier context, & session history summary."""
         lowered = user_text.lower()
 
         # If in verifier context or table input
@@ -58,8 +60,11 @@ class LlmAgent(Agent):
         # Socratic Tutor logic
         if self.name == "socratic_tutor":
             if "proof" in lowered or "prove" in lowered or "show that" in lowered:
+                prefix = ""
+                if session_state and session_state.summary:
+                    prefix = f"[Prior Context Summary: {session_state.summary}]\n"
                 return (
-                    "To prove this property, let's step back and inspect the definitions.\n"
+                    f"{prefix}To prove this property, let's step back and inspect the definitions.\n"
                     "What is the definition of normal subgroup? "
                     "How do we show a subgroup is normal? "
                     "Let's choose an arbitrary element $g \\in G$ and $h \\in H \\cap K$."
@@ -69,12 +74,13 @@ class LlmAgent(Agent):
         return "Could you elaborate on the mathematical definitions involved?"
 
 class WorkflowAgent(Agent):
-    """Stateful Graph Workflow Agent for routing user inputs."""
-    def __init__(self, name: str, edges: List[Any]):
+    """Stateful Graph Workflow Agent supporting Async Session Persistence and Compaction."""
+    def __init__(self, name: str, edges: List[Any], memory: Optional[AsyncSessionMemory] = None):
         super().__init__(name=name)
         self.edges = edges
         self.routes: Dict[str, Union[Agent, Callable]] = {}
         self.intent_parser: Optional[Callable] = None
+        self.memory = memory or AsyncSessionMemory()
 
         # Unpack edges graph structure
         for edge in edges:
@@ -85,37 +91,49 @@ class WorkflowAgent(Agent):
                     for route_key, target_agent in edge[1].items():
                         self.routes[route_key] = target_agent
 
-    def process(self, user_text: str, mcp_server: Optional[Any] = None) -> Dict[str, Any]:
-        """Runs the workflow graph for a given user input."""
-        node_input = types.Content.from_text(user_text)
+    async def process_async(self, user_text: str, session_id: str = "default_session", mcp_server: Optional[Any] = None) -> Dict[str, Any]:
+        """Asynchronously executes graph workflow with persistent memory & history compaction."""
+        # 1. Asynchronously load & update persistent session memory
+        await self.memory.save_turn(session_id=session_id, role="user", content=user_text)
+        session_state = await self.memory.get_session(session_id)
 
-        # Step 1: Run intent router
+        # 2. Run intent parser
+        node_input = types.Content.from_text(user_text)
         events = list(self.intent_parser(node_input))
         selected_route = "SOCRATIC_ROUTE"
         if events and events[0].route:
             selected_route = events[0].route[0]
 
         target_agent = self.routes.get(selected_route)
-        
-        # Step 2: Handle verifier MCP tool calls if table/check requested
+
+        # 3. Handle MCP tool calls
         context = {}
         if selected_route == "VERIFIER_ROUTE" and mcp_server:
-            # Execute verify_group_axioms tool via MCP
             tool_output = mcp_server.execute_tool(
                 tool_name="verify_group_axioms",
-                arguments={"set_definition": "{e, a}", "operation": user_text}
+                arguments={"set_definition": "{e, a, b}", "operation": user_text}
             )
             context["mcp_tool_result"] = tool_output
 
-        # Step 3: Target agent response generation
+        # 4. Generate response incorporating session summary
         if isinstance(target_agent, LlmAgent):
-            response = target_agent.generate_response(user_text, context=context)
+            response = target_agent.generate_response(user_text, context=context, session_state=session_state)
         else:
             response = "Agent routing failed."
+
+        # 5. Asynchronously persist agent response turn
+        await self.memory.save_turn(session_id=session_id, role="assistant", content=response)
+        updated_session = await self.memory.get_session(session_id)
 
         return {
             "route": selected_route,
             "agent": target_agent.name if isinstance(target_agent, LlmAgent) else "unknown",
             "response": response,
-            "context": context
+            "context": context,
+            "session_summary": updated_session.summary,
+            "turn_count": len(updated_session.turns)
         }
+
+    def process(self, user_text: str, session_id: str = "default_session", mcp_server: Optional[Any] = None) -> Dict[str, Any]:
+        """Synchronous wrapper around process_async."""
+        return asyncio.run(self.process_async(user_text=user_text, session_id=session_id, mcp_server=mcp_server))

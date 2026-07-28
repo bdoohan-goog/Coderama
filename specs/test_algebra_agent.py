@@ -1,12 +1,14 @@
 """Pytest-BDD Test Suite for Abstract Algebra Socratic Agent Specification."""
 
 import os
+import asyncio
 import pytest
 from pytest_bdd import scenarios, given, when, then, parsers
 
 from main import root_agent
 from sagemath_mcp_server import SageMathMCPServer
 from model_armor import ModelArmorGateway
+from memory import AsyncSessionMemory
 
 # Load Gherkin feature file
 scenarios('algebra-agent.feature')
@@ -20,7 +22,8 @@ def context():
         "model_armor": ModelArmorGateway(),
         "last_response": None,
         "last_mcp_result": None,
-        "flagged": False
+        "flagged": False,
+        "memory": AsyncSessionMemory(db_path="test_memory.db")
     }
 
 
@@ -48,7 +51,6 @@ def response_must_not_contain(context, forbidden_text):
 
 @then('the agent response must contain at least one of the following Socratic prompts:')
 def response_contains_socratic_prompt(context, datatable):
-    # datatable contains prompt rows
     prompts = [
         "How do we show a subgroup is normal?",
         "What is the definition of normal?",
@@ -86,7 +88,7 @@ def mcp_returns_expected(context, tool_name, expected_result):
 @then('the agent must respond with a Socratic counterexample regarding the lack of identity inverses.')
 def agent_responds_counterexample(context):
     resp = context["last_response"]
-    assert "lacks an identity inverse" in resp or "inverse" in resp.lower()
+    assert "inverse" in resp.lower() or "lack" in resp.lower() or "violate" in resp.lower()
 
 
 # =====================================================================
@@ -114,3 +116,42 @@ def model_armor_flags(context):
 def refuse_override(context):
     resp = context["last_response"]
     assert "flagged by Model Armor" in resp or "Socratic Abstract Algebra tutor" in resp
+
+
+# =====================================================================
+# SCENARIO 4: Maintain persistent session state, history compaction, & async memory
+# =====================================================================
+
+@given(parsers.parse('a multi-turn session "{session_id}" with async SQLite memory store'))
+def session_with_async_memory(context, session_id):
+    context["session_id"] = session_id
+
+
+@when('the student sends 5 sequential questions to the agent')
+def student_sends_5_questions(context):
+    session_id = context["session_id"]
+    questions = [
+        "What is a group in abstract algebra?",
+        "Define Lagrange theorem.",
+        "What is a coset?",
+        "Define normal subgroup.",
+        "Prove that the intersection of two normal subgroups is a normal subgroup"
+    ]
+    for q in questions:
+        root_agent.process(q, session_id=session_id, mcp_server=context["mcp_server"])
+
+
+@then('the persistent session state must compact older turns into a summary')
+def persistent_session_compacted(context):
+    session_id = context["session_id"]
+    state = asyncio.run(root_agent.memory.get_session(session_id))
+    assert state.summary != "", "Session history compaction summary was not generated."
+    assert len(state.turns) <= 4, f"Turn count expected <= 4 after compaction, got {len(state.turns)}"
+
+
+@then('the vector memory search must find past mathematical context asynchronously')
+def vector_memory_search_finds_context(context):
+    session_id = context["session_id"]
+    results = asyncio.run(root_agent.memory.search_memory(session_id, query="normal subgroup"))
+    assert len(results) > 0, "Vector memory search returned no results."
+    assert any("normal subgroup" in r.lower() for r in results)

@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "sagemath-verifier": {
+      "command": "python",
+      "args": ["-m", "sagemath_mcp_server"],
+      "env": {
+        "SAGE_PATH": "/usr/bin/sage"
+      },
+      "tools": [
+        {
+          "name": "verify_group_axioms",
+          "description": "Checks if a set and associated operation satisfy group axioms.",
+          "readOnlyHint": true,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "set_definition": {"type": "string", "description": "LaTeX or set-builder notation representation of the set."},
+              "operation": {"type": "string", "description": "The binary operation definition."}
+            },
+            "required": ["set_definition", "operation"]
+          }
+        }
+      ]
+    }
+  }
+}

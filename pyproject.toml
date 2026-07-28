@@ -1,0 +1,36 @@
+[project]
+name = "abstract-algebra-agent"
+version = "0.1.0"
+description = "Enterprise-ready Abstract Algebra Socratic Tutoring Agent built with ADK 2.0 & MCP"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=8.0.0",
+    "pytest-bdd>=7.0.0",
+    "mcp>=1.0.0",
+    "pydantic>=2.0.0",
+    "sympy>=1.12",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["specs"]
+python_files = ["test_*.py", "*_test.py"]
+bdd_features_base_dir = "specs"
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["google"]
+include = [
+  "*.py"
+]
+
+
+

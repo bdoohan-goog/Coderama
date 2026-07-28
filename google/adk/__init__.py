@@ -1,9 +1,10 @@
-"""Google Agent Development Kit (ADK) 2.0 Core Module with Strategic Model Routing & HITL Support."""
+"""Google Agent Development Kit (ADK) 2.0 Core Module with Observability, OpenTelemetry, & PII Redaction."""
 
 import asyncio
 from typing import Any, Callable, Dict, List, Optional, Union
 from pydantic import BaseModel, Field
 from memory import AsyncSessionMemory, SessionState, HistoryCompactor
+from observability import OpenTelemetryTracer, StructuredLogger, PIIRedactor
 
 # =====================================================================
 # TYPES & HITL DEFINITIONS
@@ -38,7 +39,6 @@ class HumanInTheLoopHook:
         self.approval_callback = callback
 
     def request_approval(self, tool_name: str, arguments: Dict[str, Any], read_only_hint: bool = True) -> bool:
-        """Evaluates whether tool execution is approved by human supervisor."""
         if read_only_hint and self.auto_approve_read_only and not self.approval_callback:
             return True
 
@@ -46,7 +46,6 @@ class HumanInTheLoopHook:
             approved = self.approval_callback(tool_name, arguments)
             return approved
 
-        # Default fallback to human approval requirement
         confirmation_id = f"{tool_name}_{len(self.pending_confirmations)}"
         self.pending_confirmations[confirmation_id] = {
             "tool_name": tool_name,
@@ -65,7 +64,6 @@ class Event(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 class Agent:
-    """Base class for ADK 2.0 Agents."""
     def __init__(self, name: str):
         self.name = name
 
@@ -73,15 +71,13 @@ class LlmAgent(Agent):
     """LLM powered specialized agent supporting Strategic Model Routing."""
     def __init__(self, name: str, model: str, instruction: str, tools: Optional[List[Any]] = None):
         super().__init__(name=name)
-        self.model = model  # e.g., 'gemini-2.5-pro' (high reasoning) vs 'gemini-2.5-flash-latest' (fast Socratic)
+        self.model = model
         self.instruction = instruction
         self.tools = tools or []
 
     def generate_response(self, user_text: str, context: Optional[Dict[str, Any]] = None, session_state: Optional[SessionState] = None) -> str:
-        """Generates response using specific strategic model capabilities."""
         lowered = user_text.lower()
 
-        # Math verifier using reasoning model (gemini-2.5-pro)
         if self.name == "math_verifier":
             if context and "hitl_rejected" in context:
                 return "Tool execution paused: Human-in-the-Loop confirmation was rejected by supervisor."
@@ -91,7 +87,6 @@ class LlmAgent(Agent):
                 return f"[{self.model.upper()} Symbolic Reasoning Output]\n{mcp_res}\n\nSocratic Inquiry: Look closely at rows $a$ and $b$. What definition or property of group inverses does this table violate?"
             return f"[{self.model.upper()}] Let me check the mathematical structure using the SageMath verifier. Please provide the operational table."
 
-        # Socratic Tutor using conversational model (gemini-2.5-flash-latest)
         if self.name == "socratic_tutor":
             if "proof" in lowered or "prove" in lowered or "show that" in lowered:
                 prefix = ""
@@ -108,7 +103,7 @@ class LlmAgent(Agent):
         return "Could you elaborate on the mathematical definitions involved?"
 
 class WorkflowAgent(Agent):
-    """Stateful Graph Workflow Agent with Strategic Model Routing & HITL Support."""
+    """Stateful Graph Workflow Agent with Observability, OpenTelemetry, & PII Redaction."""
     def __init__(self, name: str, edges: List[Any], memory: Optional[AsyncSessionMemory] = None, hitl_hook: Optional[HumanInTheLoopHook] = None):
         super().__init__(name=name)
         self.edges = edges
@@ -116,8 +111,9 @@ class WorkflowAgent(Agent):
         self.intent_parser: Optional[Callable] = None
         self.memory = memory or AsyncSessionMemory()
         self.hitl_hook = hitl_hook or HumanInTheLoopHook()
+        self.tracer = OpenTelemetryTracer(service_name=self.name)
+        self.logger = StructuredLogger(service_name=self.name)
 
-        # Unpack edges graph structure
         for edge in edges:
             if edge[0] == "START":
                 self.intent_parser = edge[1]
@@ -127,26 +123,53 @@ class WorkflowAgent(Agent):
                         self.routes[route_key] = target_agent
 
     async def process_async(self, user_text: str, session_id: str = "default_session", mcp_server: Optional[Any] = None) -> Dict[str, Any]:
-        """Asynchronously executes workflow with strategic model routing & HITL tool verification."""
-        await self.memory.save_turn(session_id=session_id, role="user", content=user_text)
+        """Asynchronously executes workflow with OpenTelemetry spans & Structured JSON logging."""
+        # 1. Scrub PII before storage & logging
+        clean_user_text = PIIRedactor.redact(user_text)
+
+        # 2. OpenTelemetry Root Workflow Span
+        root_span = self.tracer.start_span("agent_workflow_execution")
+        root_span.set_attribute("session_id", session_id)
+        root_span.set_attribute("user_text", clean_user_text)
+
+        self.logger.log_event(
+            event_type="WORKFLOW_START",
+            trace_id=root_span.trace_id,
+            span_id=root_span.span_id,
+            data={"session_id": session_id, "user_input": clean_user_text}
+        )
+
+        # 3. Asynchronously load & update persistent session memory
+        await self.memory.save_turn(session_id=session_id, role="user", content=clean_user_text)
         session_state = await self.memory.get_session(session_id)
 
-        # Step 1: Run intent parser
-        node_input = types.Content.from_text(user_text)
+        # 4. Intent Parser Span & JSON Logging
+        route_span = self.tracer.start_span("intent_routing", trace_id=root_span.trace_id, parent_span_id=root_span.span_id)
+        node_input = types.Content.from_text(clean_user_text)
         events = list(self.intent_parser(node_input))
         selected_route = "SOCRATIC_ROUTE"
         if events and events[0].route:
             selected_route = events[0].route[0]
 
+        route_span.set_attribute("selected_route", selected_route)
+        route_span.end()
+
+        self.logger.log_event(
+            event_type="INTENT_ROUTED",
+            trace_id=root_span.trace_id,
+            span_id=route_span.span_id,
+            data={"route": selected_route}
+        )
+
         target_agent = self.routes.get(selected_route)
         context = {}
 
-        # Step 2: Handle tool execution with HITL confirmation hook
+        # 5. Tool Call Span & JSON Logging
         if selected_route == "VERIFIER_ROUTE" and mcp_server:
+            tool_span = self.tracer.start_span("tool_execution", trace_id=root_span.trace_id, parent_span_id=root_span.span_id)
             tool_name = "verify_group_axioms"
-            tool_args = {"set_definition": "{e, a, b}", "operation": user_text}
+            tool_args = {"set_definition": "{e, a, b}", "operation": clean_user_text}
 
-            # Human-in-the-loop confirmation check
             is_approved = self.hitl_hook.request_approval(tool_name=tool_name, arguments=tool_args, read_only_hint=True)
             if is_approved:
                 tool_output = mcp_server.execute_tool(tool_name=tool_name, arguments=tool_args)
@@ -156,25 +179,49 @@ class WorkflowAgent(Agent):
                 context["hitl_rejected"] = True
                 context["mcp_tool_result"] = "Tool execution rejected by Human-in-the-Loop supervisor."
 
-        # Step 3: Response generation using strategically routed model
+            tool_span.set_attribute("tool_name", tool_name)
+            tool_span.set_attribute("hitl_approved", context.get("hitl_approved", False))
+            tool_span.end()
+
+            self.logger.log_event(
+                event_type="TOOL_EXECUTED",
+                trace_id=root_span.trace_id,
+                span_id=tool_span.span_id,
+                data={"tool_name": tool_name, "context": context}
+            )
+
+        # 6. Response Generation & Outcome Tracking
         if isinstance(target_agent, LlmAgent):
-            response = target_agent.generate_response(user_text, context=context, session_state=session_state)
+            response = target_agent.generate_response(clean_user_text, context=context, session_state=session_state)
             used_model = target_agent.model
         else:
             response = "Agent routing failed."
             used_model = "unknown"
 
-        await self.memory.save_turn(session_id=session_id, role="assistant", content=response)
+        clean_response = PIIRedactor.redact(response)
+        await self.memory.save_turn(session_id=session_id, role="assistant", content=clean_response)
         updated_session = await self.memory.get_session(session_id)
+
+        root_span.set_attribute("status", "SUCCESS")
+        root_span.set_attribute("model", used_model)
+        root_span.end()
+
+        self.logger.log_event(
+            event_type="WORKFLOW_COMPLETE",
+            trace_id=root_span.trace_id,
+            span_id=root_span.span_id,
+            data={"outcome": "SUCCESS", "model": used_model, "response": clean_response}
+        )
 
         return {
             "route": selected_route,
             "agent": target_agent.name if isinstance(target_agent, LlmAgent) else "unknown",
             "model": used_model,
-            "response": response,
+            "response": clean_response,
             "context": context,
             "session_summary": updated_session.summary,
-            "turn_count": len(updated_session.turns)
+            "turn_count": len(updated_session.turns),
+            "trace_id": root_span.trace_id
         }
 
     def process(self, user_text: str, session_id: str = "default_session", mcp_server: Optional[Any] = None) -> Dict[str, Any]:

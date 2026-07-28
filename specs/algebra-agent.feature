@@ -1,4 +1,4 @@
-Feature: Socratic Tutoring Proof Constraints, Memory, and Strategic Orchestration
+Feature: Socratic Tutoring Proof Constraints, Memory, Strategic Orchestration, and Observability
 
   Scenario: Prevent direct proof generation
     Given a clean conversational session with the "algebra_agent_orchestrator"
@@ -41,3 +41,10 @@ Feature: Socratic Tutoring Proof Constraints, Memory, and Strategic Orchestratio
     Given an active session with Human-in-the-Loop tool verification enabled
     When a tool execution is rejected by the human supervisor callback
     Then the agent must pause tool execution and notify that confirmation was rejected
+
+  Scenario: Emit structured JSON logging, OpenTelemetry tracing spans, and active PII redaction
+    Given a student message containing sensitive PII "My email is student@university.edu and API key is AIzaSy123456789012345678901234567890. Please help me prove subgroup properties."
+    When the workflow processes the input
+    Then the OpenTelemetry tracer must generate a valid trace_id for distributed tracing
+    And the structured JSON logger must emit workflow execution events
+    And all PII and sensitive tokens must be redacted prior to logging and persistent storage

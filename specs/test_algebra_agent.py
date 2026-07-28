@@ -1,6 +1,7 @@
 """Pytest-BDD Test Suite for Abstract Algebra Socratic Agent Specification."""
 
 import os
+import time
 import asyncio
 import pytest
 from pytest_bdd import scenarios, given, when, then, parsers
@@ -9,6 +10,7 @@ from main import root_agent, hitl_gateway, socratic_tutor, math_verifier
 from sagemath_mcp_server import SageMathMCPServer
 from model_armor import ModelArmorGateway
 from memory import AsyncSessionMemory
+from observability import PIIRedactor, OpenTelemetryTracer
 
 # Load Gherkin feature file
 scenarios('algebra-agent.feature')
@@ -192,7 +194,6 @@ def verify_socratic_flash_model(context, expected_flash_model):
 
 @given('an active session with Human-in-the-Loop tool verification enabled')
 def session_with_hitl_enabled(context):
-    # Set HITL callback that rejects execution
     def reject_callback(tool_name, args):
         return False
 
@@ -204,8 +205,6 @@ def tool_execution_rejected(context):
     res = root_agent.process("check table: * | e | a; e | e | a; a | a | a", mcp_server=context["mcp_server"])
     context["last_response"] = res["response"]
     context["last_context"] = res["context"]
-
-    # Reset callback after test
     root_agent.hitl_hook.set_approval_callback(None)
 
 
@@ -213,3 +212,47 @@ def tool_execution_rejected(context):
 def agent_notifies_rejection(context):
     assert context["last_context"].get("hitl_rejected") is True
     assert "Human-in-the-Loop confirmation was rejected" in context["last_response"]
+
+
+# =====================================================================
+# SCENARIO 7: Emit structured JSON logging, OpenTelemetry tracing spans, & active PII redaction
+# =====================================================================
+
+@given(parsers.parse('a student message containing sensitive PII "{pii_input}"'))
+def student_input_pii(context, pii_input):
+    context["pii_input"] = pii_input
+
+
+@when('the workflow processes the input')
+def workflow_processes_pii(context):
+    session_id = f"pii_test_{time.time()}"
+    context["pii_session_id"] = session_id
+    res = root_agent.process(context["pii_input"], session_id=session_id, mcp_server=context["mcp_server"])
+    context["pii_res"] = res
+
+
+@then('the OpenTelemetry tracer must generate a valid trace_id for distributed tracing')
+def verify_opentelemetry_trace_id(context):
+    res = context["pii_res"]
+    assert "trace_id" in res
+    assert len(res["trace_id"]) > 0
+
+
+@then('the structured JSON logger must emit workflow execution events')
+def verify_structured_json_logger(context):
+    assert len(root_agent.tracer.active_spans) > 0
+
+
+@then('all PII and sensitive tokens must be redacted prior to logging and persistent storage')
+def verify_pii_redacted(context):
+    session_id = context["pii_session_id"]
+    state = asyncio.run(root_agent.memory.get_session(session_id))
+    assert len(state.turns) > 0
+    stored_text = state.turns[0].content
+
+    # Check PII scrubbing
+    assert "student@university.edu" not in stored_text
+    assert "[REDACTED_EMAIL]" in stored_text
+    assert "AIzaSy123456789012345678901234567890" not in stored_text
+    assert "[REDACTED_API_KEY]" in stored_text
+

@@ -6,6 +6,7 @@ import json
 import math
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
+from observability import PIIRedactor
 
 import time
 
@@ -111,6 +112,8 @@ class AsyncSessionMemory:
         return await asyncio.to_thread(self._save_turn_sync, session_id, role, content)
 
     def _save_turn_sync(self, session_id: str, role: str, content: str) -> SessionState:
+        # Active PII redaction prior to storage
+        clean_content = PIIRedactor.redact(content)
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
@@ -120,12 +123,12 @@ class AsyncSessionMemory:
             # Insert turn
             now = 0.0
             cursor.execute("INSERT INTO turns (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-                           (session_id, role, content, now))
+                           (session_id, role, clean_content, now))
 
-            # Store simple TF-IDF / character n-gram vector mock embedding for vector search
-            vec = [float(ord(char) % 10) for char in content[:10]]
+            # Store simple vector mock embedding for vector search
+            vec = [float(ord(char) % 10) for char in clean_content[:10]]
             cursor.execute("INSERT INTO memory_vectors (session_id, text, vector) VALUES (?, ?, ?)",
-                           (session_id, content, json.dumps(vec)))
+                           (session_id, clean_content, json.dumps(vec)))
 
             conn.commit()
 

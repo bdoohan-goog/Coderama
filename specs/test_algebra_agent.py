@@ -5,7 +5,7 @@ import asyncio
 import pytest
 from pytest_bdd import scenarios, given, when, then, parsers
 
-from main import root_agent
+from main import root_agent, hitl_gateway, socratic_tutor, math_verifier
 from sagemath_mcp_server import SageMathMCPServer
 from model_armor import ModelArmorGateway
 from memory import AsyncSessionMemory
@@ -155,3 +155,61 @@ def vector_memory_search_finds_context(context):
     results = asyncio.run(root_agent.memory.search_memory(session_id, query="normal subgroup"))
     assert len(results) > 0, "Vector memory search returned no results."
     assert any("normal subgroup" in r.lower() for r in results)
+
+
+# =====================================================================
+# SCENARIO 5: Strategic Model Routing based on Task Complexity
+# =====================================================================
+
+@given(parsers.parse('a student query requiring complex symbolic verification "{query}"'))
+def student_query_complex(context, query):
+    context["complex_query"] = query
+
+
+@when(parsers.parse('the orchestrator routes the request to "{target_route}"'))
+def orchestrator_routes_request(context, target_route):
+    res = root_agent.process(context["complex_query"], mcp_server=context["mcp_server"])
+    context["last_run_res"] = res
+
+
+@then(parsers.parse('the system must strategically route the task to the high-reasoning model "{expected_model}"'))
+def verify_strategic_model_used(context, expected_model):
+    res = context["last_run_res"]
+    assert res["model"] == expected_model, f"Expected model '{expected_model}', got '{res['model']}'"
+    assert math_verifier.model == "gemini-2.5-pro"
+
+
+@then(parsers.parse('Socratic conversational turns must route to "{expected_flash_model}"'))
+def verify_socratic_flash_model(context, expected_flash_model):
+    res = root_agent.process("How do I show a subgroup is normal?", mcp_server=context["mcp_server"])
+    assert res["model"] == expected_flash_model, f"Expected Socratic model '{expected_flash_model}', got '{res['model']}'"
+    assert socratic_tutor.model == "gemini-2.5-flash-latest"
+
+
+# =====================================================================
+# SCENARIO 6: Human-in-the-Loop confirmation hooks for tool execution
+# =====================================================================
+
+@given('an active session with Human-in-the-Loop tool verification enabled')
+def session_with_hitl_enabled(context):
+    # Set HITL callback that rejects execution
+    def reject_callback(tool_name, args):
+        return False
+
+    root_agent.hitl_hook.set_approval_callback(reject_callback)
+
+
+@when('a tool execution is rejected by the human supervisor callback')
+def tool_execution_rejected(context):
+    res = root_agent.process("check table: * | e | a; e | e | a; a | a | a", mcp_server=context["mcp_server"])
+    context["last_response"] = res["response"]
+    context["last_context"] = res["context"]
+
+    # Reset callback after test
+    root_agent.hitl_hook.set_approval_callback(None)
+
+
+@then('the agent must pause tool execution and notify that confirmation was rejected')
+def agent_notifies_rejection(context):
+    assert context["last_context"].get("hitl_rejected") is True
+    assert "Human-in-the-Loop confirmation was rejected" in context["last_response"]

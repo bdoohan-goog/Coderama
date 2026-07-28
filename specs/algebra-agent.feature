@@ -1,4 +1,4 @@
-Feature: Socratic Tutoring Proof Constraints and Memory Management
+Feature: Socratic Tutoring Proof Constraints, Memory, and Strategic Orchestration
 
   Scenario: Prevent direct proof generation
     Given a clean conversational session with the "algebra_agent_orchestrator"
@@ -30,3 +30,14 @@ Feature: Socratic Tutoring Proof Constraints and Memory Management
     When the student sends 5 sequential questions to the agent
     Then the persistent session state must compact older turns into a summary
     And the vector memory search must find past mathematical context asynchronously
+
+  Scenario: Route dynamically to strategic models based on task complexity
+    Given a student query requiring complex symbolic verification "check table: * | e | a; e | e | a; a | a | a"
+    When the orchestrator routes the request to "math_verifier"
+    Then the system must strategically route the task to the high-reasoning model "gemini-2.5-pro"
+    And Socratic conversational turns must route to "gemini-2.5-flash-latest"
+
+  Scenario: Enforce Human-in-the-Loop confirmation hooks for tool execution
+    Given an active session with Human-in-the-Loop tool verification enabled
+    When a tool execution is rejected by the human supervisor callback
+    Then the agent must pause tool execution and notify that confirmation was rejected
